@@ -6,6 +6,19 @@ export interface PullRequest {
   headRefName: string;
 }
 
+export interface GitHubIssue {
+  number: number;
+  title: string;
+  body: string;
+  labels: string[];
+}
+
+export interface IssueComment {
+  body: string;
+  author: string;
+  created: string;
+}
+
 export interface ReviewComment {
   type: "comment" | "review" | "inline";
   body: string;
@@ -133,6 +146,224 @@ export async function getReviewComments(
   return comments.sort(
     (a, b) => new Date(a.created).getTime() - new Date(b.created).getTime(),
   );
+}
+
+export async function resolveReviewThreads(
+  repo: string,
+  prNumber: number,
+  comments: ReviewComment[],
+): Promise<number> {
+  const [owner, name] = repo.split("/");
+
+  // 1. Fetch all review threads via GraphQL
+  const query = `
+    query($owner: String!, $name: String!, $pr: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $pr) {
+          reviewThreads(first: 100) {
+            nodes {
+              id
+              isResolved
+              path
+              comments(first: 10) {
+                nodes {
+                  body
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const raw = await gh([
+    "api",
+    "graphql",
+    "-f",
+    `query=${query}`,
+    "-f",
+    `owner=${owner}`,
+    "-f",
+    `name=${name}`,
+    "-F",
+    `pr=${prNumber}`,
+  ]);
+
+  const data = JSON.parse(raw);
+  const threads = data.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
+
+  // 2. Match threads against processed comments
+  const processedInline = comments.filter((c) => c.type === "inline" && c.path);
+
+  let resolved = 0;
+  for (const thread of threads) {
+    if (thread.isResolved) continue;
+
+    const threadBodies: string[] = (thread.comments?.nodes ?? []).map(
+      (n: { body: string }) => n.body,
+    );
+
+    const matched = processedInline.some(
+      (c) =>
+        c.path === thread.path &&
+        threadBodies.some((tb) => tb.includes(c.body) || c.body.includes(tb)),
+    );
+
+    if (!matched) continue;
+
+    // 3. Resolve the thread
+    const mutation = `
+      mutation($threadId: ID!) {
+        resolveReviewThread(input: {threadId: $threadId}) {
+          thread { id isResolved }
+        }
+      }
+    `;
+
+    try {
+      await gh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${mutation}`,
+        "-f",
+        `threadId=${thread.id}`,
+      ]);
+      resolved++;
+    } catch {
+      // Individual thread resolve failure — continue with others
+    }
+  }
+
+  return resolved;
+}
+
+// ─── Issue helpers ──────────────────────────────────────────────
+
+export async function getIssuesByLabel(
+  repo: string,
+  label: string,
+): Promise<GitHubIssue[]> {
+  const raw = await gh([
+    "issue",
+    "list",
+    "--repo",
+    repo,
+    "--label",
+    label,
+    "--state",
+    "open",
+    "--json",
+    "number,title,body,labels",
+    "--limit",
+    "100",
+  ]);
+  const issues = JSON.parse(raw);
+  return issues.map((i: { number: number; title: string; body: string; labels: { name: string }[] }) => ({
+    number: i.number,
+    title: i.title,
+    body: i.body ?? "",
+    labels: (i.labels ?? []).map((l: { name: string }) => l.name),
+  }));
+}
+
+export async function getIssueComments(
+  repo: string,
+  issueNumber: number,
+): Promise<IssueComment[]> {
+  const raw = await gh([
+    "issue",
+    "view",
+    String(issueNumber),
+    "--repo",
+    repo,
+    "--json",
+    "comments",
+  ]);
+  const data = JSON.parse(raw);
+  return (data.comments ?? []).map(
+    (c: { body: string; author: { login: string }; createdAt: string }) => ({
+      body: c.body,
+      author: c.author?.login ?? "unknown",
+      created: c.createdAt,
+    }),
+  );
+}
+
+export async function commentOnIssue(
+  repo: string,
+  issueNumber: number,
+  body: string,
+): Promise<void> {
+  await gh([
+    "issue",
+    "comment",
+    String(issueNumber),
+    "--repo",
+    repo,
+    "--body",
+    body,
+  ]);
+}
+
+export async function updateIssueBody(
+  repo: string,
+  issueNumber: number,
+  body: string,
+): Promise<void> {
+  await gh([
+    "issue",
+    "edit",
+    String(issueNumber),
+    "--repo",
+    repo,
+    "--body",
+    body,
+  ]);
+}
+
+export async function setIssueLabel(
+  repo: string,
+  issueNumber: number,
+  addLabel: string,
+  removeLabel?: string,
+): Promise<void> {
+  const args = [
+    "issue",
+    "edit",
+    String(issueNumber),
+    "--repo",
+    repo,
+    "--add-label",
+    addLabel,
+  ];
+  if (removeLabel) {
+    args.push("--remove-label", removeLabel);
+  }
+  await gh(args);
+}
+
+export async function createPullRequest(
+  repo: string,
+  branch: string,
+  issue: GitHubIssue,
+): Promise<string> {
+  const body = `Closes #${issue.number}\n\nAutomatically implemented by pr-farmer.`;
+  const result = await gh([
+    "pr",
+    "create",
+    "--repo",
+    repo,
+    "--head",
+    branch,
+    "--title",
+    `feat: ${issue.title}`,
+    "--body",
+    body,
+  ]);
+  // gh pr create prints the PR URL
+  return result.trim();
 }
 
 export function formatReviewForPrompt(

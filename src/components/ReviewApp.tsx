@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from "react";
-import { Box, Text } from "ink";
+import { Box, Text, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import {
   getRepo,
   getOpenPRs,
   getReviewComments,
   formatReviewForPrompt,
+  resolveReviewThreads,
   type PullRequest,
   type ReviewComment,
 } from "../lib/github.js";
@@ -18,6 +19,19 @@ import {
   type Worktree,
 } from "../lib/git.js";
 import { processReview } from "../lib/claude.js";
+
+function formatError(err: unknown): string {
+  if (!(err instanceof Error)) return "Processing failed";
+  const msg = err.message;
+  const timeoutMatch = msg.match(/timed? ?out after (\d+)/i);
+  if (timeoutMatch) {
+    const mins = Math.round(Number(timeoutMatch[1]) / 60000);
+    return `Timed out after ${mins} min`;
+  }
+  if (msg.length > 120) return msg.slice(0, 120) + "…";
+  return msg;
+}
+
 import {
   ReviewPicker,
   type PRWithComments,
@@ -41,6 +55,8 @@ export function ReviewApp({ repo: repoArg, dryRun }: ReviewAppProps) {
   const [prData, setPrData] = useState<PRWithComments[]>([]);
   const [statuses, setStatuses] = useState<PRProcessStatus[]>([]);
   const [error, setError] = useState("");
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const { stdout } = useStdout();
 
   useEffect(() => {
     loadReviews();
@@ -117,8 +133,14 @@ export function ReviewApp({ repo: repoArg, dryRun }: ReviewAppProps) {
       );
 
       const feedback = formatReviewForPrompt(pr, comments);
+      setLogLines([]);
       try {
-        await processReview(feedback, pr.number, pr.title, worktree.path);
+        await processReview(feedback, pr.number, pr.title, worktree.path, (chunk) => {
+          setLogLines((prev) => {
+            const newLines = (prev.join("") + chunk).split("\n");
+            return newLines;
+          });
+        });
 
         if (dryRun) {
           setStatuses((prev) =>
@@ -146,9 +168,17 @@ export function ReviewApp({ repo: repoArg, dryRun }: ReviewAppProps) {
             worktree.path,
           );
 
+          let resolveMsg = "";
+          try {
+            const resolved = await resolveReviewThreads(repo, pr.number, comments);
+            if (resolved > 0) resolveMsg = `, ${resolved} thread(s) resolved`;
+          } catch {
+            // Don't break the flow if resolving fails
+          }
+
           setStatuses((prev) =>
             prev.map((s, idx) =>
-              idx === i ? { ...s, status: "done", message: "Committed & pushed" } : s,
+              idx === i ? { ...s, status: "done", message: `Committed & pushed${resolveMsg}` } : s,
             ),
           );
         } else {
@@ -162,7 +192,7 @@ export function ReviewApp({ repo: repoArg, dryRun }: ReviewAppProps) {
         setStatuses((prev) =>
           prev.map((s, idx) =>
             idx === i
-              ? { ...s, status: "error", message: err instanceof Error ? err.message : "Processing failed" }
+              ? { ...s, status: "error", message: formatError(err) }
               : s,
           ),
         );
@@ -215,6 +245,10 @@ export function ReviewApp({ repo: repoArg, dryRun }: ReviewAppProps) {
               )}
             </Box>
           ))}
+
+          {logLines.length > 0 && (
+            <LogView lines={logLines} maxRows={Math.max(6, (stdout.rows ?? 24) - statuses.length - 8)} />
+          )}
         </Box>
       )}
 
@@ -223,10 +257,25 @@ export function ReviewApp({ repo: repoArg, dryRun }: ReviewAppProps) {
           {error ? (
             <Text color="red">{error}</Text>
           ) : (
-            <Text color="green">
-              Done! {statuses.filter((s) => s.status === "done").length} processed,{" "}
-              {statuses.filter((s) => s.status === "error").length} errors.
-            </Text>
+            <>
+              {statuses.map((s) => (
+                <Box key={s.pr.number}>
+                  <ProcessIcon status={s.status} />
+                  <Text> </Text>
+                  <Text bold>#{s.pr.number}</Text>
+                  <Text> {s.pr.title}</Text>
+                  {s.message && (
+                    <Text color={s.status === "error" ? "red" : "gray"}> — {s.message}</Text>
+                  )}
+                </Box>
+              ))}
+              <Box marginTop={1}>
+                <Text color="green">
+                  Done! {statuses.filter((s) => s.status === "done").length} processed,{" "}
+                  {statuses.filter((s) => s.status === "error").length} errors.
+                </Text>
+              </Box>
+            </>
           )}
         </Box>
       )}
@@ -249,4 +298,18 @@ function ProcessIcon({ status }: { status: PRProcessStatus["status"] }) {
     case "error":
       return <Text color="red">✗</Text>;
   }
+}
+
+function LogView({ lines, maxRows }: { lines: string[]; maxRows: number }) {
+  const visible = lines.slice(-maxRows);
+  return (
+    <Box flexDirection="column" marginTop={1} height={maxRows}>
+      <Box marginBottom={0}>
+        <Text color="gray" dimColor>{"─".repeat(40)} claude output {"─".repeat(40)}</Text>
+      </Box>
+      {visible.map((line, i) => (
+        <Text key={i} color="gray" wrap="truncate">{line}</Text>
+      ))}
+    </Box>
+  );
 }

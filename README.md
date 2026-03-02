@@ -1,8 +1,13 @@
 # pr-farmer 🌾
 
-Automatically process [CodeRabbit](https://coderabbit.ai) review comments with [Claude Code](https://claude.ai/claude-code).
+Automatically process [CodeRabbit](https://coderabbit.ai) review comments and implement GitHub issues with [Claude Code](https://claude.ai/claude-code).
 
-pr-farmer fetches open pull requests from your GitHub repo, collects all CodeRabbit review comments (general + inline), and passes them to Claude Code to implement the suggested improvements. Changes are auto-committed and pushed.
+pr-farmer is a full issue-to-PR pipeline: triage enhancement issues into plans, review and approve them, then auto-implement and open pull requests — all powered by Claude Code.
+
+```
+enhancement issue → (seed) → ready_to_review → (manual approval) → ready_to_develop → (pull) → PR opened
+                     CodeRabbit reviews → (fix/review) → changes committed & pushed
+```
 
 ## Getting Started
 
@@ -45,11 +50,13 @@ If you haven't already, add [CodeRabbit](https://coderabbit.ai) to your GitHub r
 ### 5. Run it
 
 ```bash
-cd your-project   # navigate to any repo with open PRs
-pr-farmer review   # interactive mode — pick which reviews to fix
+cd your-project       # navigate to any repo with open PRs
+pr-farmer seed        # triage enhancement issues into plans
+pr-farmer review      # interactive mode — pick which reviews to fix
+pr-farmer pull        # implement approved issues and open PRs
 ```
 
-That's it! pr-farmer will detect the repo, fetch CodeRabbit reviews, and let Claude Code fix them.
+That's it! pr-farmer will detect the repo and let Claude Code handle the rest.
 
 ## Commands
 
@@ -109,35 +116,78 @@ pr-farmer review --repo owner/repo --dry-run
   ○ src/time.ts:42  Consider caching…
 ```
 
+### `pr-farmer seed` — Triage enhancement issues
+
+Fetches all open issues labeled `enhancement`, sends each to Claude to produce an implementation plan, and writes the plan into the issue body.
+
+- If the issue is clear: writes the plan and re-labels `enhancement` → `ready_to_review`
+- If the issue is ambiguous: posts clarifying questions as a comment and re-labels `enhancement` → `question`
+
+```bash
+pr-farmer seed
+
+# With options
+pr-farmer seed --repo owner/repo --dry-run
+```
+
+### `pr-farmer pull` — Implement approved issues
+
+Fetches all open issues labeled `ready_to_develop`, creates a feature branch for each, runs Claude to implement the changes, and opens a PR with `Closes #N`.
+
+```bash
+pr-farmer pull
+
+# With options
+pr-farmer pull --repo owner/repo --dry-run
+```
+
+**Label workflow:**
+
+| Label | Meaning |
+|-------|---------|
+| `enhancement` | New issue, needs triage (`seed`) |
+| `question` | Needs clarification before planning |
+| `ready_to_review` | Plan written, awaiting human approval |
+| `ready_to_develop` | Approved, ready for implementation (`pull`) |
+
 ## How it works
 
 ```
 ┌─────────────┐     ┌───────────┐     ┌─────────────┐     ┌──────────┐
 │  GitHub API  │────▶│ pr-farmer │────▶│ Claude Code │────▶│ git push │
-│  (via gh)    │     │           │     │  (in worktree) │  │          │
+│  (via gh)    │     │           │     │ (in worktree) │   │          │
 └─────────────┘     └───────────┘     └─────────────┘     └──────────┘
 ```
 
-1. Detects the current GitHub repository (or uses `--repo`)
-2. Fetches all open pull requests
-3. Collects CodeRabbit comments per PR:
-   - General PR comments
-   - Review bodies
-   - Inline file-specific review comments
-4. Creates a **git worktree** for each PR branch (no dirty state, no branch switching)
-5. Passes the review feedback to Claude Code inside the worktree
-6. If Claude made changes: auto-commits and pushes to the PR branch
-7. Cleans up worktrees automatically
+**fix / review:**
+1. Fetches open pull requests and their review comments
+2. Creates a **git worktree** for each PR branch
+3. Passes review feedback to Claude Code inside the worktree
+4. If Claude made changes: auto-commits and pushes to the PR branch
+5. Cleans up worktrees automatically
+
+**seed:**
+1. Fetches open issues labeled `enhancement`
+2. Sends each issue to Claude for analysis
+3. Writes the implementation plan into the issue body (or posts questions)
+4. Updates labels to reflect the new status
+
+**pull:**
+1. Fetches open issues labeled `ready_to_develop`
+2. Creates a feature branch and worktree for each issue
+3. Runs Claude to implement the feature based on the issue and plan
+4. Commits, pushes, and opens a PR linking back to the issue
 
 ### Why worktrees?
 
-Instead of `git checkout` (which requires a clean working tree and interrupts your work), pr-farmer creates temporary [git worktrees](https://git-scm.com/docs/git-worktree). Each PR gets its own isolated copy of the repo. Your current branch and uncommitted changes stay untouched.
+Instead of `git checkout` (which requires a clean working tree and interrupts your work), pr-farmer creates temporary [git worktrees](https://git-scm.com/docs/git-worktree). Each PR/issue gets its own isolated copy of the repo. Your current branch and uncommitted changes stay untouched.
 
 ## Tips
 
 - Use `--dry-run` first to see what Claude would change without committing
 - Use `pr-farmer fix --pr 8` to process a single PR when you know exactly which one
-- Use `pr-farmer review` when you want to cherry-pick specific suggestions
+- Use `pr-farmer review` when you want to cherry-pick specific review suggestions
+- Use `pr-farmer seed` + `pr-farmer pull` for the full issue-to-PR pipeline
 - Works from any directory inside a git repo — it auto-detects the remote
 
 ## License

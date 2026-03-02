@@ -52,6 +52,50 @@ export async function commitAndPush(
   await execa("git", ["push", "origin", branch], opts);
 }
 
+// ─── Feature branch helpers ─────────────────────────────────────
+
+export function slugifyBranch(issueNumber: number, title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+  return `feat/issue-${issueNumber}-${slug}`;
+}
+
+export async function createFeatureBranch(
+  branchName: string,
+): Promise<Worktree> {
+  const root = await getRepoRoot();
+  const worktreePath = join(root, WORKTREE_DIR, branchName.replace(/\//g, "-"));
+
+  try {
+    // Try creating worktree with new branch
+    await execa("git", ["worktree", "add", "-b", branchName, worktreePath], {
+      cwd: root,
+    });
+  } catch {
+    // Branch may already exist — delete stale worktree if any, then reuse the branch
+    try {
+      await execa("git", ["worktree", "remove", worktreePath, "--force"], { cwd: root });
+    } catch {
+      // worktree might not exist, that's fine
+    }
+    await execa("git", ["worktree", "prune"], { cwd: root });
+
+    try {
+      // Try checking out the existing branch into a new worktree
+      await execa("git", ["worktree", "add", worktreePath, branchName], { cwd: root });
+    } catch {
+      // Branch exists but maybe has diverged — delete it and recreate
+      await execa("git", ["branch", "-D", branchName], { cwd: root });
+      await execa("git", ["worktree", "add", "-b", branchName, worktreePath], { cwd: root });
+    }
+  }
+
+  return { path: worktreePath, branch: branchName };
+}
+
 // ─── Worktree management ────────────────────────────────────────
 
 export interface Worktree {

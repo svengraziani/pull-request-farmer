@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from "react";
-import { Box, Text } from "ink";
+import { Box, Text, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import {
   getRepo,
   getOpenPRs,
   getReviewComments,
   formatReviewForPrompt,
+  resolveReviewThreads,
   type PullRequest,
   type ReviewComment,
 } from "../lib/github.js";
@@ -18,6 +19,20 @@ import {
   type Worktree,
 } from "../lib/git.js";
 import { processReview } from "../lib/claude.js";
+
+function formatError(err: unknown): string {
+  if (!(err instanceof Error)) return "Processing failed";
+  const msg = err.message;
+  // execa timeout errors include the full command — extract just the timeout part
+  const timeoutMatch = msg.match(/timed? ?out after (\d+)/i);
+  if (timeoutMatch) {
+    const mins = Math.round(Number(timeoutMatch[1]) / 60000);
+    return `Timed out after ${mins} min`;
+  }
+  // Truncate long error messages (execa includes full command)
+  if (msg.length > 120) return msg.slice(0, 120) + "…";
+  return msg;
+}
 
 interface PRStatus {
   pr: PullRequest;
@@ -38,6 +53,8 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
   const [statuses, setStatuses] = useState<PRStatus[]>([]);
   const [phase, setPhase] = useState<"init" | "fetching" | "processing" | "done">("init");
   const [error, setError] = useState("");
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const { stdout } = useStdout();
 
   useEffect(() => {
     run();
@@ -141,8 +158,14 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
         );
 
         const feedback = formatReviewForPrompt(pr, comments);
+        setLogLines([]);
         try {
-          await processReview(feedback, pr.number, pr.title, worktree.path);
+          await processReview(feedback, pr.number, pr.title, worktree.path, (chunk) => {
+            setLogLines((prev) => {
+              const newLines = (prev.join("") + chunk).split("\n");
+              return newLines;
+            });
+          });
 
           if (dryRun) {
             setStatuses((prev) =>
@@ -165,9 +188,18 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
               `fix: apply review suggestions for PR #${pr.number}\n\nAutomatically processed by pr-farmer.\nBased on ${generalCount} comment(s) and ${inlineCount} inline review(s).`,
               worktree.path,
             );
+
+            let resolveMsg = "";
+            try {
+              const resolved = await resolveReviewThreads(r, pr.number, comments);
+              if (resolved > 0) resolveMsg = `, ${resolved} thread(s) resolved`;
+            } catch {
+              // Don't break the flow if resolving fails
+            }
+
             setStatuses((prev) =>
               prev.map((s, idx) =>
-                idx === i ? { ...s, status: "done", message: "Committed & pushed" } : s,
+                idx === i ? { ...s, status: "done", message: `Committed & pushed${resolveMsg}` } : s,
               ),
             );
           } else {
@@ -181,7 +213,7 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
           setStatuses((prev) =>
             prev.map((s, idx) =>
               idx === i
-                ? { ...s, status: "error", message: err instanceof Error ? err.message : "Processing failed" }
+                ? { ...s, status: "error", message: formatError(err) }
                 : s,
             ),
           );
@@ -239,6 +271,10 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
               )}
             </Box>
           ))}
+
+          {logLines.length > 0 && phase === "processing" && (
+            <LogView lines={logLines} maxRows={Math.max(6, (stdout.rows ?? 24) - statuses.length - 8)} />
+          )}
         </Box>
       )}
 
@@ -273,4 +309,18 @@ function StatusIcon({ status }: { status: PRStatus["status"] }) {
     case "error":
       return <Text color="red">✗</Text>;
   }
+}
+
+function LogView({ lines, maxRows }: { lines: string[]; maxRows: number }) {
+  const visible = lines.slice(-maxRows);
+  return (
+    <Box flexDirection="column" marginTop={1} height={maxRows}>
+      <Box marginBottom={0}>
+        <Text color="gray" dimColor>{"─".repeat(40)} claude output {"─".repeat(40)}</Text>
+      </Box>
+      {visible.map((line, i) => (
+        <Text key={i} color="gray" wrap="truncate">{line}</Text>
+      ))}
+    </Box>
+  );
 }
