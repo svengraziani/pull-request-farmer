@@ -10,6 +10,7 @@ export interface ReviewComment {
   type: "comment" | "review" | "inline";
   body: string;
   created: string;
+  author: string;
   path?: string;
   line?: number;
 }
@@ -76,21 +77,23 @@ export async function getReviewComments(
     const data = JSON.parse(raw);
 
     for (const c of data.comments ?? []) {
-      if (c.author?.login === "coderabbitai") {
+      if (c.body) {
         comments.push({
           type: "comment",
           body: c.body,
           created: c.createdAt,
+          author: c.author?.login ?? "unknown",
         });
       }
     }
 
     for (const r of data.reviews ?? []) {
-      if (r.author?.login === "coderabbitai") {
+      if (r.body) {
         comments.push({
           type: "review",
           body: r.body,
           created: r.submittedAt,
+          author: r.author?.login ?? "unknown",
         });
       }
     }
@@ -112,14 +115,12 @@ export async function getReviewComments(
       : JSON.parse(`[${raw.split("]\n[").join(",")}]`).flat();
 
     for (const c of parsed) {
-      if (
-        c.user?.login === "coderabbitai[bot]" ||
-        c.user?.login === "coderabbitai"
-      ) {
+      if (c.body) {
         comments.push({
           type: "inline",
           body: c.body,
           created: c.created_at,
+          author: c.user?.login ?? "unknown",
           path: c.path,
           line: c.line,
         });
@@ -141,20 +142,20 @@ export function formatReviewForPrompt(
   const generalComments = comments.filter((c) => c.type !== "inline");
   const inlineComments = comments.filter((c) => c.type === "inline");
 
-  let prompt = `# CodeRabbit Review for PR #${pr.number}: ${pr.title}\n`;
+  let prompt = `# Review Feedback for PR #${pr.number}: ${pr.title}\n`;
   prompt += `Branch: ${pr.headRefName}\n\n`;
 
   if (generalComments.length > 0) {
     prompt += `## General Comments\n\n`;
     for (const c of generalComments) {
-      prompt += `### ${c.type} (${c.created})\n${c.body}\n\n`;
+      prompt += `### ${c.type} by @${c.author} (${c.created})\n${c.body}\n\n`;
     }
   }
 
   if (inlineComments.length > 0) {
     prompt += `## Inline Reviews (file-specific)\n\n`;
     for (const c of inlineComments) {
-      prompt += `### ${c.path}:${c.line}\n${c.body}\n\n`;
+      prompt += `### ${c.path}:${c.line} by @${c.author}\n${c.body}\n\n`;
     }
   }
 

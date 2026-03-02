@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Box, Text, useInput, useApp } from "ink";
+import { Box, Text, useInput, useApp, useStdout } from "ink";
 import type { PullRequest, ReviewComment } from "../lib/github.js";
 
 export interface PRWithComments {
@@ -26,6 +26,7 @@ interface FlatItem {
 
 export function ReviewPicker({ prs, onConfirm }: ReviewPickerProps) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
 
   // Build flat list of selectable items
   const flatItems: FlatItem[] = [];
@@ -38,17 +39,33 @@ export function ReviewPicker({ prs, onConfirm }: ReviewPickerProps) {
   }
 
   const [cursor, setCursor] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(0);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [confirmed, setConfirmed] = useState(false);
+
+  // Reserve lines for header (title + help + margins) and footer
+  const terminalRows = stdout.rows ?? 24;
+  const chromeLines = 6; // header, help, padding, footer area
+  const viewportSize = Math.max(5, terminalRows - chromeLines);
 
   useInput((input, key) => {
     if (confirmed) return;
 
     if (key.upArrow || input === "k") {
-      setCursor((c) => Math.max(0, c - 1));
+      setCursor((c) => {
+        const next = Math.max(0, c - 1);
+        setScrollOffset((off) => (next < off ? next : off));
+        return next;
+      });
     }
     if (key.downArrow || input === "j") {
-      setCursor((c) => Math.min(flatItems.length - 1, c + 1));
+      setCursor((c) => {
+        const next = Math.min(flatItems.length - 1, c + 1);
+        setScrollOffset((off) =>
+          next >= off + viewportSize ? next - viewportSize + 1 : off,
+        );
+        return next;
+      });
     }
 
     // Space: toggle selection
@@ -129,6 +146,10 @@ export function ReviewPicker({ prs, onConfirm }: ReviewPickerProps) {
   ).length;
   const totalComments = flatItems.filter((f) => f.kind === "comment").length;
 
+  const visibleItems = flatItems.slice(scrollOffset, scrollOffset + viewportSize);
+  const hasMore = scrollOffset + viewportSize < flatItems.length;
+  const hasLess = scrollOffset > 0;
+
   return (
     <Box flexDirection="column" padding={1}>
       <Box marginBottom={1}>
@@ -147,8 +168,13 @@ export function ReviewPicker({ prs, onConfirm }: ReviewPickerProps) {
         </Text>
       </Box>
 
-      <Box flexDirection="column">
-        {flatItems.map((item, i) => {
+      {hasLess && (
+        <Text color="gray">  ↑ {scrollOffset} more above</Text>
+      )}
+
+      <Box flexDirection="column" height={viewportSize}>
+        {visibleItems.map((item) => {
+          const i = item.index;
           const isCursor = i === cursor;
           const isSelected = selected.has(i);
 
@@ -161,7 +187,7 @@ export function ReviewPicker({ prs, onConfirm }: ReviewPickerProps) {
             ).length;
 
             return (
-              <Box key={`pr-${item.pr.number}`} marginTop={i > 0 ? 1 : 0}>
+              <Box key={`pr-${item.pr.number}`}>
                 <Text color={isCursor ? "cyan" : "white"}>
                   {isCursor ? "❯ " : "  "}
                 </Text>
@@ -179,8 +205,8 @@ export function ReviewPicker({ prs, onConfirm }: ReviewPickerProps) {
           const comment = item.comment!;
           const label =
             comment.type === "inline"
-              ? `${comment.path}:${comment.line}`
-              : comment.type;
+              ? `${comment.path}:${comment.line} @${comment.author}`
+              : `${comment.type} @${comment.author}`;
 
           // Truncate body for preview
           const preview = comment.body
@@ -202,6 +228,10 @@ export function ReviewPicker({ prs, onConfirm }: ReviewPickerProps) {
           );
         })}
       </Box>
+
+      {hasMore && (
+        <Text color="gray">  ↓ {flatItems.length - scrollOffset - viewportSize} more below</Text>
+      )}
     </Box>
   );
 }

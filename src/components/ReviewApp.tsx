@@ -67,7 +67,7 @@ export function ReviewApp({ repo: repoArg, dryRun }: ReviewAppProps) {
       }
 
       if (withComments.length === 0) {
-        setError("No PRs with CodeRabbit reviews found.");
+        setError("No PRs with reviews found.");
         setPhase("done");
         return;
       }
@@ -142,7 +142,7 @@ export function ReviewApp({ repo: repoArg, dryRun }: ReviewAppProps) {
 
           await commitAndPush(
             pr.headRefName,
-            `fix: apply CodeRabbit review suggestions for PR #${pr.number}\n\nAutomatically processed by pr-farmer.\nBased on ${generalCount} comment(s) and ${inlineCount} inline review(s).`,
+            `fix: apply review suggestions for PR #${pr.number}\n\nAutomatically processed by pr-farmer.\nBased on ${generalCount} comment(s) and ${inlineCount} inline review(s).`,
             worktree.path,
           );
 

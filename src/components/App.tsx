@@ -105,7 +105,7 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
           setStatuses((prev) =>
             prev.map((s, idx) =>
               idx === i
-                ? { ...s, status: "skipped", message: "No CodeRabbit comments" }
+                ? { ...s, status: "skipped", message: "No review comments" }
                 : s,
             ),
           );
@@ -162,7 +162,7 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
 
             await commitAndPush(
               pr.headRefName,
-              `fix: apply CodeRabbit review suggestions for PR #${pr.number}\n\nAutomatically processed by pr-farmer.\nBased on ${generalCount} comment(s) and ${inlineCount} inline review(s).`,
+              `fix: apply review suggestions for PR #${pr.number}\n\nAutomatically processed by pr-farmer.\nBased on ${generalCount} comment(s) and ${inlineCount} inline review(s).`,
               worktree.path,
             );
             setStatuses((prev) =>

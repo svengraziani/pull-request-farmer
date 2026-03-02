@@ -7,7 +7,7 @@ export async function processReview(
   cwd?: string,
 ): Promise<string> {
   const prompt = `
-You are processing CodeRabbit review feedback for PR #${prNumber} (${prTitle}).
+You are processing review feedback for PR #${prNumber} (${prTitle}).
 
 Analyze the suggestions and implement the sensible improvements directly in the code.
 
@@ -16,6 +16,7 @@ Rules:
 - Ignore purely cosmetic suggestions without added value
 - Ignore summaries / walkthroughs — focus on concrete change suggestions
 - For inline reviews: file and line are in the header
+- Reviews may come from different authors — if reviewers contradict each other, prefer the suggestion that best improves code quality
 
 Give a brief summary of what you changed at the end.
 `;
