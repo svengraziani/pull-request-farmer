@@ -5,6 +5,8 @@ import {
   getRepo,
   getIssuesByLabel,
   getIssueComments,
+  setIssueLabel,
+  removeIssueLabel,
   createPullRequest,
   type GitHubIssue,
 } from "../lib/github.js";
@@ -78,6 +80,22 @@ export function PullApp({ repo: repoArg, dryRun }: PullAppProps) {
       for (let i = 0; i < issues.length; i++) {
         const issue = issues[i];
 
+        // Claim the issue immediately to prevent parallel runs from picking it up
+        if (!dryRun) {
+          try {
+            await setIssueLabel(r, issue.number, "in_progress", "ready_to_develop");
+          } catch {
+            setIssueStates((prev) =>
+              prev.map((s, idx) =>
+                idx === i
+                  ? { ...s, status: "error", message: "Failed to claim issue" }
+                  : s,
+              ),
+            );
+            continue;
+          }
+        }
+
         // Fetch issue comments (to get the plan)
         setIssueStates((prev) =>
           prev.map((s, idx) => (idx === i ? { ...s, status: "loading" } : s)),
@@ -87,6 +105,9 @@ export function PullApp({ repo: repoArg, dryRun }: PullAppProps) {
         try {
           comments = await getIssueComments(r, issue.number);
         } catch (err) {
+          if (!dryRun) {
+            try { await setIssueLabel(r, issue.number, "ready_to_develop", "in_progress"); } catch {}
+          }
           setIssueStates((prev) =>
             prev.map((s, idx) =>
               idx === i
@@ -107,6 +128,9 @@ export function PullApp({ repo: repoArg, dryRun }: PullAppProps) {
         try {
           worktree = await createFeatureBranch(branchName);
         } catch (err) {
+          if (!dryRun) {
+            try { await setIssueLabel(r, issue.number, "ready_to_develop", "in_progress"); } catch {}
+          }
           setIssueStates((prev) =>
             prev.map((s, idx) =>
               idx === i
@@ -143,6 +167,8 @@ export function PullApp({ repo: repoArg, dryRun }: PullAppProps) {
 
           const changed = await hasChanges(worktree.path);
           if (!changed) {
+            // Restore label — nothing was done
+            try { await setIssueLabel(r, issue.number, "ready_to_develop", "in_progress"); } catch {}
             setIssueStates((prev) =>
               prev.map((s, idx) =>
                 idx === i ? { ...s, status: "done", message: "No changes produced" } : s,
@@ -169,12 +195,16 @@ export function PullApp({ repo: repoArg, dryRun }: PullAppProps) {
           );
 
           const prUrl = await createPullRequest(r, branchName, issue);
+          // Clean up the in_progress label — issue will be closed by "Closes #N" on merge
+          try { await removeIssueLabel(r, issue.number, "in_progress"); } catch {}
           setIssueStates((prev) =>
             prev.map((s, idx) =>
               idx === i ? { ...s, status: "done", message: `PR created: ${prUrl}` } : s,
             ),
           );
         } catch (err) {
+          // Restore label so the issue can be retried
+          try { await setIssueLabel(r, issue.number, "ready_to_develop", "in_progress"); } catch {}
           setIssueStates((prev) =>
             prev.map((s, idx) =>
               idx === i

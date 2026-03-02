@@ -323,6 +323,22 @@ export async function updateIssueBody(
   ]);
 }
 
+export async function removeIssueLabel(
+  repo: string,
+  issueNumber: number,
+  label: string,
+): Promise<void> {
+  await gh([
+    "issue",
+    "edit",
+    String(issueNumber),
+    "--repo",
+    repo,
+    "--remove-label",
+    label,
+  ]);
+}
+
 export async function setIssueLabel(
   repo: string,
   issueNumber: number,
