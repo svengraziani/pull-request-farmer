@@ -4,6 +4,7 @@ export async function processReview(
   feedback: string,
   prNumber: number,
   prTitle: string,
+  cwd?: string,
 ): Promise<string> {
   const prompt = `
 You are processing CodeRabbit review feedback for PR #${prNumber} (${prTitle}).
@@ -22,6 +23,7 @@ Give a brief summary of what you changed at the end.
   const result = await execa("claude", ["-p", prompt], {
     input: feedback,
     timeout: 5 * 60 * 1000, // 5 min per PR
+    ...(cwd ? { cwd } : {}),
   });
 
   return result.stdout;

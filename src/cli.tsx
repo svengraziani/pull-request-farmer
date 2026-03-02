@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { render } from "ink";
 import React from "react";
 import { App } from "./components/App.js";
+import { ReviewApp } from "./components/ReviewApp.js";
 
 const program = new Command();
 
@@ -13,8 +14,8 @@ program
 
 program
   .command("fix")
-  .description("Fetch CodeRabbit reviews from open PRs and apply fixes with Claude Code")
-  .option("-r, --repo <owner/repo>", "GitHub repository (default: auto-detect from git remote)")
+  .description("Auto-fix all CodeRabbit reviews on open PRs (non-interactive)")
+  .option("-r, --repo <owner/repo>", "GitHub repository (default: auto-detect)")
   .option("-p, --pr <number>", "Process only a specific PR number", parseInt)
   .option("--dry-run", "Run without committing or pushing changes")
   .action((opts) => {
@@ -23,7 +24,17 @@ program
     );
   });
 
-// Default command: show help
+program
+  .command("review")
+  .description("Interactively pick which CodeRabbit reviews to process")
+  .option("-r, --repo <owner/repo>", "GitHub repository (default: auto-detect)")
+  .option("--dry-run", "Run without committing or pushing changes")
+  .action((opts) => {
+    render(
+      <ReviewApp repo={opts.repo} dryRun={opts.dryRun} />,
+    );
+  });
+
 program
   .action(() => {
     program.help();

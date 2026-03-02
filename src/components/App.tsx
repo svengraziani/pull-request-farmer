@@ -10,17 +10,18 @@ import {
   type ReviewComment,
 } from "../lib/github.js";
 import {
-  getCurrentBranch,
-  checkoutBranch,
-  pullLatest,
+  createWorktree,
+  removeWorktree,
   hasChanges,
   commitAndPush,
+  cleanupAllWorktrees,
+  type Worktree,
 } from "../lib/git.js";
 import { processReview } from "../lib/claude.js";
 
 interface PRStatus {
   pr: PullRequest;
-  status: "pending" | "loading" | "processing" | "committing" | "done" | "skipped" | "error";
+  status: "pending" | "loading" | "worktree" | "processing" | "committing" | "done" | "skipped" | "error";
   commentCount: number;
   inlineCount: number;
   message?: string;
@@ -36,7 +37,6 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
   const [repo, setRepo] = useState(repoArg ?? "");
   const [statuses, setStatuses] = useState<PRStatus[]>([]);
   const [phase, setPhase] = useState<"init" | "fetching" | "processing" | "done">("init");
-  const [originalBranch, setOriginalBranch] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -45,7 +45,6 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
 
   async function run() {
     try {
-      // Detect repo
       let r = repoArg ?? "";
       if (!r) {
         setPhase("init");
@@ -53,15 +52,9 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
       }
       setRepo(r);
 
-      // Save current branch
-      const branch = await getCurrentBranch();
-      setOriginalBranch(branch);
-
-      // Fetch PRs
       setPhase("fetching");
       let prs = await getOpenPRs(r);
 
-      // Filter to single PR if specified
       if (prNumber) {
         prs = prs.filter((p) => p.number === prNumber);
         if (prs.length === 0) {
@@ -85,27 +78,21 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
       setStatuses(initial);
       setPhase("processing");
 
-      // Process PRs sequentially
       for (let i = 0; i < prs.length; i++) {
         const pr = prs[i];
 
-        // Update status: loading comments
+        // Fetch comments
         setStatuses((prev) =>
-          prev.map((s, idx) =>
-            idx === i ? { ...s, status: "loading" } : s,
-          ),
+          prev.map((s, idx) => (idx === i ? { ...s, status: "loading" } : s)),
         );
 
-        // Fetch comments
         let comments: ReviewComment[];
         try {
           comments = await getReviewComments(r, pr.number);
         } catch {
           setStatuses((prev) =>
             prev.map((s, idx) =>
-              idx === i
-                ? { ...s, status: "error", message: "Failed to fetch comments" }
-                : s,
+              idx === i ? { ...s, status: "error", message: "Failed to fetch comments" } : s,
             ),
           );
           continue;
@@ -118,78 +105,75 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
           setStatuses((prev) =>
             prev.map((s, idx) =>
               idx === i
-                ? { ...s, status: "skipped", commentCount: 0, inlineCount: 0, message: "No CodeRabbit comments" }
+                ? { ...s, status: "skipped", message: "No CodeRabbit comments" }
                 : s,
             ),
           );
           continue;
         }
 
-        // Update counts
+        // Create worktree
         setStatuses((prev) =>
           prev.map((s, idx) =>
             idx === i
-              ? { ...s, status: "processing", commentCount: generalCount, inlineCount }
+              ? { ...s, status: "worktree", commentCount: generalCount, inlineCount }
               : s,
           ),
         );
 
-        // Checkout branch
-        const checked = await checkoutBranch(pr.headRefName);
-        if (!checked) {
+        let worktree: Worktree;
+        try {
+          worktree = await createWorktree(pr.headRefName);
+        } catch (err) {
           setStatuses((prev) =>
             prev.map((s, idx) =>
               idx === i
-                ? { ...s, status: "error", message: `Cannot checkout ${pr.headRefName}` }
+                ? { ...s, status: "error", message: `Worktree failed: ${err instanceof Error ? err.message : "unknown"}` }
                 : s,
             ),
           );
           continue;
         }
-        await pullLatest();
 
-        // Process with Claude
+        // Process with Claude in worktree
+        setStatuses((prev) =>
+          prev.map((s, idx) => (idx === i ? { ...s, status: "processing" } : s)),
+        );
+
         const feedback = formatReviewForPrompt(pr, comments);
         try {
-          const output = await processReview(feedback, pr.number, pr.title);
+          await processReview(feedback, pr.number, pr.title, worktree.path);
 
           if (dryRun) {
             setStatuses((prev) =>
               prev.map((s, idx) =>
-                idx === i
-                  ? { ...s, status: "done", message: "Dry run — no commit" }
-                  : s,
+                idx === i ? { ...s, status: "done", message: "Dry run — no commit" } : s,
               ),
             );
+            await removeWorktree(worktree);
             continue;
           }
 
-          // Commit & push
-          const changed = await hasChanges();
+          const changed = await hasChanges(worktree.path);
           if (changed) {
             setStatuses((prev) =>
-              prev.map((s, idx) =>
-                idx === i ? { ...s, status: "committing" } : s,
-              ),
+              prev.map((s, idx) => (idx === i ? { ...s, status: "committing" } : s)),
             );
 
             await commitAndPush(
               pr.headRefName,
               `fix: apply CodeRabbit review suggestions for PR #${pr.number}\n\nAutomatically processed by pr-farmer.\nBased on ${generalCount} comment(s) and ${inlineCount} inline review(s).`,
+              worktree.path,
             );
             setStatuses((prev) =>
               prev.map((s, idx) =>
-                idx === i
-                  ? { ...s, status: "done", message: "Committed & pushed" }
-                  : s,
+                idx === i ? { ...s, status: "done", message: "Committed & pushed" } : s,
               ),
             );
           } else {
             setStatuses((prev) =>
               prev.map((s, idx) =>
-                idx === i
-                  ? { ...s, status: "done", message: "No changes needed" }
-                  : s,
+                idx === i ? { ...s, status: "done", message: "No changes needed" } : s,
               ),
             );
           }
@@ -197,22 +181,17 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
           setStatuses((prev) =>
             prev.map((s, idx) =>
               idx === i
-                ? {
-                    ...s,
-                    status: "error",
-                    message: err instanceof Error ? err.message : "Claude processing failed",
-                  }
+                ? { ...s, status: "error", message: err instanceof Error ? err.message : "Processing failed" }
                 : s,
             ),
           );
         }
+
+        // Cleanup worktree
+        await removeWorktree(worktree);
       }
 
-      // Return to original branch
-      if (originalBranch || branch) {
-        await checkoutBranch(branch);
-      }
-
+      await cleanupAllWorktrees();
       setPhase("done");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -223,61 +202,40 @@ export function App({ repo: repoArg, dryRun, prNumber }: AppProps) {
   return (
     <Box flexDirection="column" padding={1}>
       <Box marginBottom={1}>
-        <Text bold color="cyan">
-          {"🌾 pr-farmer"}
-        </Text>
-        {repo ? (
-          <Text color="gray"> — {repo}</Text>
-        ) : null}
-        {dryRun ? (
-          <Text color="yellow"> [dry-run]</Text>
-        ) : null}
+        <Text bold color="cyan">{"🌾 pr-farmer fix"}</Text>
+        {repo ? <Text color="gray"> — {repo}</Text> : null}
+        {dryRun ? <Text color="yellow"> [dry-run]</Text> : null}
       </Box>
 
       {phase === "init" && (
         <Box>
-          <Text color="yellow">
-            <Spinner type="dots" />
-          </Text>
+          <Text color="yellow"><Spinner type="dots" /></Text>
           <Text> Detecting repository...</Text>
         </Box>
       )}
 
       {phase === "fetching" && (
         <Box>
-          <Text color="yellow">
-            <Spinner type="dots" />
-          </Text>
+          <Text color="yellow"><Spinner type="dots" /></Text>
           <Text> Fetching open pull requests...</Text>
         </Box>
       )}
 
       {error ? (
-        <Box>
-          <Text color="red">Error: {error}</Text>
-        </Box>
+        <Box><Text color="red">Error: {error}</Text></Box>
       ) : null}
 
       {statuses.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           {statuses.map((s) => (
-            <Box key={s.pr.number} marginBottom={0}>
+            <Box key={s.pr.number}>
               <StatusIcon status={s.status} />
-              <Text>
-                {" "}
-                <Text bold>#{s.pr.number}</Text> {s.pr.title}
-              </Text>
+              <Text> <Text bold>#{s.pr.number}</Text> {s.pr.title}</Text>
               {s.commentCount + s.inlineCount > 0 && (
-                <Text color="gray">
-                  {" "}
-                  ({s.commentCount + s.inlineCount} comments)
-                </Text>
+                <Text color="gray"> ({s.commentCount + s.inlineCount} comments)</Text>
               )}
               {s.message && (
-                <Text color={s.status === "error" ? "red" : "gray"}>
-                  {" "}
-                  — {s.message}
-                </Text>
+                <Text color={s.status === "error" ? "red" : "gray"}> — {s.message}</Text>
               )}
             </Box>
           ))}
@@ -302,23 +260,12 @@ function StatusIcon({ status }: { status: PRStatus["status"] }) {
     case "pending":
       return <Text color="gray">○</Text>;
     case "loading":
-      return (
-        <Text color="yellow">
-          <Spinner type="dots" />
-        </Text>
-      );
+    case "worktree":
+      return <Text color="yellow"><Spinner type="dots" /></Text>;
     case "processing":
-      return (
-        <Text color="cyan">
-          <Spinner type="dots" />
-        </Text>
-      );
+      return <Text color="cyan"><Spinner type="dots" /></Text>;
     case "committing":
-      return (
-        <Text color="blue">
-          <Spinner type="dots" />
-        </Text>
-      );
+      return <Text color="blue"><Spinner type="dots" /></Text>;
     case "done":
       return <Text color="green">●</Text>;
     case "skipped":
